@@ -3,7 +3,7 @@ import cors from 'cors';
 import express from 'express';
 import { Client, GatewayIntentBits } from 'discord.js';
 import { createDutyEmbed, createDutyBoardEmbed, DUTY_STATUSES } from './staffDuty.js';
-import { STAFF_ROLE_IDS, createModerationEmbed, hasAnyRole, parseDurationToMs, formatDuration } from './moderation.js';
+import { STAFF_ROLE_IDS, LOA_APPROVER_ROLE_IDS, createModerationEmbed, hasAnyRole, parseDurationToMs, formatDuration } from './moderation.js';
 import { createDutyCommandDefinition } from './commands.js';
 import {
   botMoods,
@@ -66,8 +66,19 @@ const isStaffMember = (member) => {
   return hasAnyRole(member, STAFF_ROLE_IDS) || member.roles.cache.some((role) => /staff|admin|moderator/i.test(role.name));
 };
 
+const canApproveLOA = (member) => {
+  if (!member) return false;
+  return hasAnyRole(member, LOA_APPROVER_ROLE_IDS);
+};
+
 const getLogChannel = (guild) => {
   const configuredChannelId = process.env.DISCORD_MOD_LOG_CHANNEL_ID;
+  if (!configuredChannelId || !guild) return null;
+  return guild.channels.cache.get(configuredChannelId) || null;
+};
+
+const getLoaLogChannel = (guild) => {
+  const configuredChannelId = process.env.DISCORD_LOA_LOG_CHANNEL_ID;
   if (!configuredChannelId || !guild) return null;
   return guild.channels.cache.get(configuredChannelId) || null;
 };
@@ -124,6 +135,12 @@ const getDutyBoardEmbed = () => {
   });
 };
 
+const isValidLoaDate = (date) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const parsedDate = new Date(`${date}T00:00:00Z`);
+  return !Number.isNaN(parsedDate.getTime()) && parsedDate.toISOString().startsWith(date);
+};
+
 const getDutyBoardChannel = () => {
   const guild = getGuild();
   const configuredChannelId = process.env.DISCORD_STAFF_CHANNEL_ID;
@@ -152,10 +169,11 @@ const refreshDutyBoard = async () => {
   }
 };
 
-const replyWithDutyEmbed = async (interaction, status, reason, memberDisplayName) => {
+const replyWithDutyEmbed = async (interaction, status, reason, memberDisplayName, date) => {
   const record = {
     status,
     reason,
+    date,
     updatedAt: new Date().toISOString(),
   };
   staffDutyStatus.set(interaction.user.id, record);
@@ -164,6 +182,7 @@ const replyWithDutyEmbed = async (interaction, status, reason, memberDisplayName
     name: memberDisplayName || interaction.user.username,
     status,
     reason,
+    date,
     updatedAt: record.updatedAt,
   });
 
@@ -477,7 +496,62 @@ const handleDutyCommand = async (interaction) => {
     }
     case 'loa': {
       const loaReason = interaction.options.getString('reason')?.trim() || 'No reason provided';
-      await replyWithDutyEmbed(interaction, DUTY_STATUSES.LOA, loaReason, interaction.member.displayName || interaction.user.username);
+      const loaDate = interaction.options.getString('date')?.trim();
+      if (!isValidLoaDate(loaDate)) {
+        await interaction.reply({ content: 'Use a valid return date in YYYY-MM-DD format.', ephemeral: true });
+        return;
+      }
+      const isApprover = canApproveLOA(interaction.member);
+
+      if (isApprover) {
+        await replyWithDutyEmbed(interaction, DUTY_STATUSES.LOA, loaReason, interaction.member.displayName || interaction.user.username, loaDate);
+        return;
+      }
+
+      const loaEmbed = createDutyEmbed({
+        name: interaction.member.displayName || interaction.user.username,
+        status: DUTY_STATUSES.LOA,
+        reason: loaReason,
+        date: loaDate,
+        updatedAt: new Date().toISOString(),
+      });
+
+      const loaLogChannel = getLoaLogChannel(interaction.guild);
+      if (loaLogChannel) {
+        await loaLogChannel.send({ embeds: [loaEmbed] }).catch(() => {});
+      }
+
+      for (const approverRoleId of LOA_APPROVER_ROLE_IDS) {
+        const role = interaction.guild.roles.cache.get(approverRoleId);
+        if (!role) continue;
+
+        const members = await interaction.guild.roles.cache.get(approverRoleId)?.members?.values?.();
+        if (!members) continue;
+
+        for (const member of members) {
+          try {
+            await member.send({
+              content: `LOA Request: ${interaction.member.displayName || interaction.user.username} has submitted an LOA.\nReturn date: ${loaDate}\nReason: ${loaReason}`,
+            });
+          } catch {
+            // ignore DM failures
+          }
+        }
+      }
+
+      await interaction.reply({
+        content: 'Your LOA request has been sent to the executive team for approval.',
+      });
+      return;
+    }
+    case 'clear': {
+      const currentStatus = staffDutyStatus.get(interaction.user.id);
+      if (!currentStatus || currentStatus.status !== DUTY_STATUSES.LOA) {
+        await interaction.reply({ content: 'You do not currently have an LOA status.', ephemeral: true });
+        return;
+      }
+
+      await replyWithDutyEmbed(interaction, DUTY_STATUSES.OFF_DUTY, 'LOA ended', interaction.member.displayName || interaction.user.username);
       return;
     }
     case 'status': {
@@ -486,6 +560,7 @@ const handleDutyCommand = async (interaction) => {
         name: interaction.member.displayName || interaction.user.username,
         status: currentStatus.status,
         reason: currentStatus.reason,
+        date: currentStatus.date,
         updatedAt: currentStatus.updatedAt || new Date().toISOString(),
       });
       await interaction.reply({ embeds: [embed] });

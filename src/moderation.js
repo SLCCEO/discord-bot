@@ -10,6 +10,12 @@ export const STAFF_ROLE_IDS = new Set([
   '866528537494421541',
 ]);
 
+export const LOA_APPROVER_ROLE_IDS = new Set([
+  '866528537494421545',
+  '1537649580294934629',
+  '1537649684380909649',
+]);
+
 export function hasAnyRole(member, roleIds = STAFF_ROLE_IDS) {
   if (!member || !member.roles || !member.roles.cache) {
     return false;

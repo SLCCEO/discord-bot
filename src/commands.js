@@ -26,9 +26,13 @@ export function createDutyCommandDefinition() {
           .setName('loa')
           .setDescription('Submit a leave of absence')
           .addStringOption((option) =>
+            option.setName('date').setDescription('Expected return date (YYYY-MM-DD)').setRequired(true),
+          )
+          .addStringOption((option) =>
             option.setName('reason').setDescription('Reason for your LOA').setRequired(true),
           ),
       )
+      .addSubcommand((subcommand) => subcommand.setName('clear').setDescription('Remove your LOA status and return to off duty'))
       .addSubcommand((subcommand) => subcommand.setName('status').setDescription('Check your current duty status'))
       .addSubcommand((subcommand) => subcommand.setName('list').setDescription('List staff duty status'))
       .toJSON(),

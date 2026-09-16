@@ -30,7 +30,7 @@ export function getDutyColor(status) {
   }
 }
 
-export function createDutyEmbed({ name, status, reason = 'No reason provided', updatedAt = new Date().toISOString() }) {
+export function createDutyEmbed({ name, status, reason = 'No reason provided', date, updatedAt = new Date().toISOString() }) {
   const cleanStatus = normalizeDutyStatus(status);
   const embed = new EmbedBuilder()
     .setTitle('Staff Duty Update')
@@ -39,7 +39,13 @@ export function createDutyEmbed({ name, status, reason = 'No reason provided', u
       { name: 'Staff Member', value: String(name || 'Unknown Staff'), inline: true },
       { name: 'Status', value: cleanStatus, inline: true },
       { name: 'Reason', value: String(reason || 'No reason provided'), inline: false },
-    )
+    );
+
+  if (cleanStatus === DUTY_STATUSES.LOA && date) {
+    embed.addFields({ name: 'Return Date', value: String(date), inline: true });
+  }
+
+  embed
     .setTimestamp(new Date(updatedAt))
     .setFooter({ text: 'Duty status updated' });
 
