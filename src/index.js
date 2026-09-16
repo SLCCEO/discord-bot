@@ -2,7 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import { Client, GatewayIntentBits } from 'discord.js';
-import { createDutyEmbed, createDutyBoardEmbed, DUTY_STATUSES, createLoaDecisionMessage } from './staffDuty.js';
+import { createDutyEmbed, createDutyBoardEmbed, DUTY_STATUSES, createLoaDecisionMessage, createLoaRequestMessage } from './staffDuty.js';
 import { STAFF_ROLE_IDS, LOA_APPROVER_ROLE_IDS, createModerationEmbed, hasAnyRole, parseDurationToMs, formatDuration } from './moderation.js';
 import { createDutyCommandDefinition } from './commands.js';
 import {
@@ -202,6 +202,55 @@ const logModerationAction = async (guild, embed) => {
   await modLogChannel.send({ embeds: [embed] }).catch(() => {});
 };
 
+const finishLoaDecision = async ({ approverMember, targetMember, decision, reasonOverride, dateOverride, guild }) => {
+  if (!targetMember || !guild) return;
+
+  const currentStatus = staffDutyStatus.get(targetMember.id);
+  const existingReason = currentStatus?.reason || 'No reason provided';
+  const existingDate = currentStatus?.date || dateOverride || 'Not provided';
+  const finalReason = reasonOverride?.trim() || existingReason;
+  const finalDate = dateOverride?.trim() || existingDate;
+
+  if (!currentStatus || currentStatus.status !== DUTY_STATUSES.LOA) {
+    return;
+  }
+
+  const decisionText = decision === 'approve' ? 'approved' : 'rejected';
+  const decisionMessage = createLoaDecisionMessage({
+    memberName: targetMember.displayName || targetMember.user.username,
+    returnDate: finalDate,
+    reason: finalReason,
+    decision: decisionText,
+    reviewedBy: approverMember?.displayName || approverMember?.user?.username || 'Approver',
+  });
+
+  const loaLogChannel = getLoaLogChannel(guild);
+  if (loaLogChannel) {
+    await loaLogChannel.send({ content: decisionMessage }).catch(() => {});
+  }
+
+  if (decision === 'approve') {
+    staffDutyStatus.set(targetMember.id, {
+      status: DUTY_STATUSES.LOA,
+      reason: `LOA approved: ${finalReason}`,
+      date: finalDate,
+      pending: false,
+      updatedAt: new Date().toISOString(),
+    });
+  } else {
+    staffDutyStatus.set(targetMember.id, {
+      status: DUTY_STATUSES.OFF_DUTY,
+      reason: `LOA rejected: ${finalReason}`,
+      date: finalDate,
+      pending: false,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  await targetMember.send({ content: decisionMessage }).catch(() => {});
+  await refreshDutyBoard();
+};
+
 const announceLoaDecision = async (interaction, member, decision, overrideReason, overrideDate) => {
   if (!interaction.guild || !member) {
     await interaction.reply({ content: 'This action can only be used in a server.', ephemeral: true });
@@ -214,52 +263,66 @@ const announceLoaDecision = async (interaction, member, decision, overrideReason
   }
 
   const currentStatus = staffDutyStatus.get(member.id);
-  const existingReason = currentStatus?.reason || 'No reason provided';
-  const existingDate = currentStatus?.date || overrideDate || 'Not provided';
-  const finalReason = overrideReason?.trim() || existingReason;
-  const finalDate = overrideDate?.trim() || existingDate;
-
   if (!currentStatus || currentStatus.status !== DUTY_STATUSES.LOA) {
     await interaction.reply({ content: `${member} does not currently have an active LOA request.`, ephemeral: true });
     return;
   }
 
-  const decisionText = decision === 'approve' ? 'approved' : 'rejected';
-  const message = createLoaDecisionMessage({
-    memberName: member.displayName || member.user.username,
-    returnDate: finalDate,
-    reason: finalReason,
-    decision: decisionText,
-    reviewedBy: interaction.member.displayName || interaction.user.username,
+  await finishLoaDecision({
+    approverMember: interaction.member,
+    targetMember: member,
+    decision,
+    reasonOverride: overrideReason,
+    dateOverride: overrideDate,
+    guild: interaction.guild,
   });
 
-  const loaLogChannel = getLoaLogChannel(interaction.guild);
-  if (loaLogChannel) {
-    await loaLogChannel.send({ content: message }).catch(() => {});
-  }
-
   const responseContent = decision === 'approve'
-    ? `${member} has been approved for LOA and returned to the staff board.`
+    ? `${member} LOA has been approved.`
     : `${member} LOA has been rejected.`;
 
-  if (decision === 'approve') {
-    staffDutyStatus.set(member.id, {
-      status: DUTY_STATUSES.OFF_DUTY,
-      reason: `LOA approved: ${finalReason}`,
-      date: finalDate,
-      updatedAt: new Date().toISOString(),
-    });
-  } else {
-    staffDutyStatus.set(member.id, {
-      status: DUTY_STATUSES.OFF_DUTY,
-      reason: `LOA rejected: ${finalReason}`,
-      date: finalDate,
-      updatedAt: new Date().toISOString(),
-    });
-  }
-
   await interaction.reply({ content: responseContent });
-  await refreshDutyBoard();
+};
+
+const notifyApproversForLoa = async (guild, targetMember, reason, date) => {
+  if (!guild || !targetMember) return;
+
+  for (const approverRoleId of LOA_APPROVER_ROLE_IDS) {
+    const role = guild.roles.cache.get(approverRoleId);
+    if (!role) continue;
+
+    for (const approver of role.members.values()) {
+      try {
+        const requestMessage = await approver.send({
+          content: createLoaRequestMessage({
+            memberName: targetMember.displayName || targetMember.user.username,
+            returnDate: date,
+            reason,
+          }),
+        });
+
+        await requestMessage.react('✅');
+        await requestMessage.react('❌');
+
+        const collectorFilter = (reaction, user) => !user.bot && user.id === approver.id && ['✅', '❌'].includes(reaction.emoji.name);
+        const collector = requestMessage.createReactionCollector({ filter: collectorFilter, max: 1, time: 1000 * 60 * 60 * 24, dispose: true });
+
+        collector.on('collect', async (reaction) => {
+          const decision = reaction.emoji.name === '✅' ? 'approve' : 'reject';
+          await finishLoaDecision({
+            approverMember: approver,
+            targetMember,
+            decision,
+            reasonOverride: reason,
+            dateOverride: date,
+            guild,
+          });
+        });
+      } catch {
+        // ignore DM failures
+      }
+    }
+  }
 };
 
 const handleFunCommand = async (interaction) => {
@@ -576,28 +639,20 @@ const handleDutyCommand = async (interaction) => {
         updatedAt: new Date().toISOString(),
       });
 
+      staffDutyStatus.set(interaction.user.id, {
+        status: DUTY_STATUSES.LOA,
+        reason: loaReason,
+        date: loaDate,
+        pending: true,
+        updatedAt: new Date().toISOString(),
+      });
+
       const loaLogChannel = getLoaLogChannel(interaction.guild);
       if (loaLogChannel) {
         await loaLogChannel.send({ embeds: [loaEmbed] }).catch(() => {});
       }
 
-      for (const approverRoleId of LOA_APPROVER_ROLE_IDS) {
-        const role = interaction.guild.roles.cache.get(approverRoleId);
-        if (!role) continue;
-
-        const members = await interaction.guild.roles.cache.get(approverRoleId)?.members?.values?.();
-        if (!members) continue;
-
-        for (const member of members) {
-          try {
-            await member.send({
-              content: `LOA Request: ${interaction.member.displayName || interaction.user.username} has submitted an LOA.\nReturn date: ${loaDate}\nReason: ${loaReason}`,
-            });
-          } catch {
-            // ignore DM failures
-          }
-        }
-      }
+      void notifyApproversForLoa(interaction.guild, interaction.member, loaReason, loaDate);
 
       await interaction.reply({
         content: 'Your LOA request has been sent to the executive team for approval.',
