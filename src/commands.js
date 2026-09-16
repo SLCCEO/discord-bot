@@ -38,6 +38,21 @@ export function createDutyCommandDefinition() {
       .toJSON(),
 
     new SlashCommandBuilder()
+      .setName('loa-approve')
+      .setDescription('Approve an LOA request')
+      .addUserOption((option) => option.setName('member').setDescription('Member whose LOA you want to approve').setRequired(true))
+      .addStringOption((option) => option.setName('date').setDescription('Expected return date (YYYY-MM-DD)').setRequired(false))
+      .addStringOption((option) => option.setName('reason').setDescription('Approval note or note to staff').setRequired(false))
+      .toJSON(),
+
+    new SlashCommandBuilder()
+      .setName('loa-reject')
+      .setDescription('Reject an LOA request')
+      .addUserOption((option) => option.setName('member').setDescription('Member whose LOA you want to reject').setRequired(true))
+      .addStringOption((option) => option.setName('reason').setDescription('Reason for the rejection').setRequired(false))
+      .toJSON(),
+
+    new SlashCommandBuilder()
       .setName('warn')
       .setDescription('Warn a member')
       .addUserOption((option) => option.setName('member').setDescription('Member to warn').setRequired(true))

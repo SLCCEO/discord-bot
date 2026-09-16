@@ -71,3 +71,16 @@ export function createDutyBoardEmbed({ onDuty = [], offDuty = [], loa = [], upda
 
   return embed;
 }
+
+export function createLoaDecisionMessage({ memberName, returnDate, reason, decision, reviewedBy }) {
+  const cleanDecision = String(decision || 'approved').trim().toLowerCase();
+  const approved = cleanDecision === 'approved' || cleanDecision === 'accept' || cleanDecision === 'true';
+
+  const statusText = approved ? 'approved' : 'rejected';
+  return [
+    `LOA ${statusText} for ${memberName || 'Unknown member'}`,
+    `Return date: ${returnDate || 'Not provided'}`,
+    `Reason: ${reason || 'No reason provided'}`,
+    `Reviewed by: ${reviewedBy || 'Unknown approver'}`,
+  ].join('\n');
+}

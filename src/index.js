@@ -2,7 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import { Client, GatewayIntentBits } from 'discord.js';
-import { createDutyEmbed, createDutyBoardEmbed, DUTY_STATUSES } from './staffDuty.js';
+import { createDutyEmbed, createDutyBoardEmbed, DUTY_STATUSES, createLoaDecisionMessage } from './staffDuty.js';
 import { STAFF_ROLE_IDS, LOA_APPROVER_ROLE_IDS, createModerationEmbed, hasAnyRole, parseDurationToMs, formatDuration } from './moderation.js';
 import { createDutyCommandDefinition } from './commands.js';
 import {
@@ -200,6 +200,66 @@ const logModerationAction = async (guild, embed) => {
   const modLogChannel = getLogChannel(guild);
   if (!modLogChannel) return;
   await modLogChannel.send({ embeds: [embed] }).catch(() => {});
+};
+
+const announceLoaDecision = async (interaction, member, decision, overrideReason, overrideDate) => {
+  if (!interaction.guild || !member) {
+    await interaction.reply({ content: 'This action can only be used in a server.', ephemeral: true });
+    return;
+  }
+
+  if (!canApproveLOA(interaction.member)) {
+    await interaction.reply({ content: 'Only LOA approvers can approve or reject LOA requests.', ephemeral: true });
+    return;
+  }
+
+  const currentStatus = staffDutyStatus.get(member.id);
+  const existingReason = currentStatus?.reason || 'No reason provided';
+  const existingDate = currentStatus?.date || overrideDate || 'Not provided';
+  const finalReason = overrideReason?.trim() || existingReason;
+  const finalDate = overrideDate?.trim() || existingDate;
+
+  if (!currentStatus || currentStatus.status !== DUTY_STATUSES.LOA) {
+    await interaction.reply({ content: `${member} does not currently have an active LOA request.`, ephemeral: true });
+    return;
+  }
+
+  const decisionText = decision === 'approve' ? 'approved' : 'rejected';
+  const message = createLoaDecisionMessage({
+    memberName: member.displayName || member.user.username,
+    returnDate: finalDate,
+    reason: finalReason,
+    decision: decisionText,
+    reviewedBy: interaction.member.displayName || interaction.user.username,
+  });
+
+  const loaLogChannel = getLoaLogChannel(interaction.guild);
+  if (loaLogChannel) {
+    await loaLogChannel.send({ content: message }).catch(() => {});
+  }
+
+  const responseContent = decision === 'approve'
+    ? `${member} has been approved for LOA and returned to the staff board.`
+    : `${member} LOA has been rejected.`;
+
+  if (decision === 'approve') {
+    staffDutyStatus.set(member.id, {
+      status: DUTY_STATUSES.OFF_DUTY,
+      reason: `LOA approved: ${finalReason}`,
+      date: finalDate,
+      updatedAt: new Date().toISOString(),
+    });
+  } else {
+    staffDutyStatus.set(member.id, {
+      status: DUTY_STATUSES.OFF_DUTY,
+      reason: `LOA rejected: ${finalReason}`,
+      date: finalDate,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  await interaction.reply({ content: responseContent });
+  await refreshDutyBoard();
 };
 
 const handleFunCommand = async (interaction) => {
@@ -635,6 +695,21 @@ client.on('interactionCreate', async (interaction) => {
 
   if (interaction.commandName === 'duty') {
     await handleDutyCommand(interaction);
+    return;
+  }
+
+  if (interaction.commandName === 'loa-approve') {
+    const member = interaction.options.getMember('member');
+    const date = interaction.options.getString('date');
+    const reason = interaction.options.getString('reason');
+    await announceLoaDecision(interaction, member, 'approve', reason, date);
+    return;
+  }
+
+  if (interaction.commandName === 'loa-reject') {
+    const member = interaction.options.getMember('member');
+    const reason = interaction.options.getString('reason');
+    await announceLoaDecision(interaction, member, 'reject', reason);
     return;
   }
 
